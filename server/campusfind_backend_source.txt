@@ -1,0 +1,577 @@
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\middleware\auth.js ==========
+
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+export async function protect(req, res, next) {
+  try {
+    const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    if (!token) return res.status(401).json({ message: "Please sign in first." });
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = await User.findById(payload.id).select("-password");
+    if (!req.user) return res.status(401).json({ message: "Account not found." });
+    next();
+  } catch { res.status(401).json({ message: "Invalid or expired session." }); }
+}
+export function adminOnly(req, res, next) {
+  if (req.user?.role !== "admin") return res.status(403).json({ message: "Admin access required." });
+  next();
+}
+
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\middleware\upload.js ==========
+
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+const uploadDir = path.resolve("uploads");
+fs.mkdirSync(uploadDir, { recursive: true });
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (_req, file, cb) => cb(null, `${Date.now()}-${Math.round(Math.random()*1e9)}${path.extname(file.originalname).toLowerCase()}`)
+});
+export const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (/^image\/(jpeg|png|webp)$/.test(file.mimetype)) cb(null, true);
+    else cb(new Error("Only JPG, PNG and WEBP images are allowed."));
+  }
+});
+
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\models\Claim.js ==========
+
+import mongoose from "mongoose";
+const claimSchema = new mongoose.Schema({
+  item: { type: mongoose.Schema.Types.ObjectId, ref: "Item", required: true },
+  claimant: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  explanation: { type: String, required: true, maxlength: 700 },
+  answerCorrect: { type: Boolean, required: true },
+  status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" }
+}, { timestamps: true });
+claimSchema.index({ item: 1, claimant: 1 });
+export default mongoose.model("Claim", claimSchema);
+
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\models\Item.js ==========
+
+import mongoose from "mongoose";
+const itemSchema = new mongoose.Schema({
+  type: { type: String, enum: ["lost", "found"], required: true },
+  title: { type: String, required: true, trim: true, maxlength: 100 },
+  description: { type: String, required: true, maxlength: 1200 },
+  category: { type: String, required: true },
+  location: { type: String, required: true, maxlength: 120 },
+  dateOccurred: { type: Date, required: true },
+  imageUrl: { type: String, default: "" },
+  status: { type: String, enum: ["open", "pending", "claimed", "closed"], default: "open" },
+  owner: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  verificationQuestion: { type: String, required: true, maxlength: 240 },
+  verificationAnswerHash: { type: String, required: true }
+}, { timestamps: true });
+itemSchema.index({ title: "text", description: "text", location: "text" });
+export default mongoose.model("Item", itemSchema);
+
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\models\User.js ==========
+
+import mongoose from "mongoose";
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true, maxlength: 80 },
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  password: { type: String, required: true },
+  role: { type: String, enum: ["student", "admin"], default: "student" }
+}, { timestamps: true });
+export default mongoose.model("User", userSchema);
+
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\routes\admin.js ==========
+
+import { Router } from "express";
+import User from "../models/User.js";
+import Item from "../models/Item.js";
+import Claim from "../models/Claim.js";
+import { protect, adminOnly } from "../middleware/auth.js";
+const router = Router();
+router.get("/stats", protect, adminOnly, async (_req, res, next) => {
+  try {
+    const [users, items, lost, found, claimed, pendingClaims] = await Promise.all([
+      User.countDocuments(), Item.countDocuments(), Item.countDocuments({type:"lost"}),
+      Item.countDocuments({type:"found"}), Item.countDocuments({status:"claimed"}),
+      Claim.countDocuments({status:"pending"})
+    ]);
+    res.json({ users, items, lost, found, claimed, pendingClaims });
+  } catch (e) { next(e); }
+});
+router.get("/items", protect, adminOnly, async (_req, res, next) => {
+  try { res.json({ items: await Item.find().populate("owner","name email").sort({createdAt:-1}).limit(200) }); }
+  catch (e) { next(e); }
+});
+export default router;
+
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\routes\auth.js ==========
+
+import { Router } from "express";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+import { protect } from "../middleware/auth.js";
+const router = Router();
+const tokenFor = id => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+router.post("/register", async (req, res, next) => {
+  try {
+    const { name, email, password } = req.body;
+    if (!name || !email || !password || password.length < 8) return res.status(400).json({ message: "Name, email and a password of at least 8 characters are required." });
+    if (await User.findOne({ email: email.toLowerCase() })) return res.status(409).json({ message: "An account with this email already exists." });
+    const user = await User.create({ name, email, password: await bcrypt.hash(password, 12) });
+    res.status(201).json({ token: tokenFor(user.id), user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+  } catch (e) { next(e); }
+});
+router.post("/login", async (req, res, next) => {
+  try {
+    const user = await User.findOne({ email: (req.body.email || "").toLowerCase() });
+    if (!user || !(await bcrypt.compare(req.body.password || "", user.password))) return res.status(401).json({ message: "Incorrect email or password." });
+    res.json({ token: tokenFor(user.id), user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+  } catch (e) { next(e); }
+});
+router.get("/me", protect, (req, res) => res.json({ user: req.user }));
+export default router;
+
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\routes\claims.js ==========
+
+import { Router } from "express";
+import Claim from "../models/Claim.js";
+import Item from "../models/Item.js";
+import { protect } from "../middleware/auth.js";
+const router = Router();
+router.get("/mine", protect, async (req, res, next) => {
+  try { res.json({ claims: await Claim.find({ claimant: req.user.id }).populate({ path: "item", select: "title type imageUrl location status" }).sort({ createdAt: -1 }) }); }
+  catch (e) { next(e); }
+});
+router.get("/received", protect, async (req, res, next) => {
+  try {
+    const owned = await Item.find({ owner: req.user.id }).select("_id");
+    res.json({ claims: await Claim.find({ item: { $in: owned.map(x => x._id) } }).populate("claimant", "name email").populate("item", "title type imageUrl status").sort({ createdAt: -1 }) });
+  } catch (e) { next(e); }
+});
+router.patch("/:id", protect, async (req, res, next) => {
+  try {
+    const claim = await Claim.findById(req.params.id).populate("item");
+    if (!claim) return res.status(404).json({ message: "Claim not found." });
+    if (String(claim.item.owner) !== req.user.id && req.user.role !== "admin") return res.status(403).json({ message: "Only the listing owner can review this claim." });
+    if (!["approved", "rejected"].includes(req.body.status)) return res.status(400).json({ message: "Decision must be approved or rejected." });
+    if (claim.status !== "pending") return res.status(400).json({ message: "This claim has already been reviewed." });
+    if (req.body.status === "approved" && !claim.answerCorrect) return res.status(400).json({ message: "Verification answer did not match. This claim cannot be approved." });
+    claim.status = req.body.status; await claim.save();
+    if (req.body.status === "approved") {
+      claim.item.status = "claimed"; await claim.item.save();
+      await Claim.updateMany({ item: claim.item._id, _id: { $ne: claim._id }, status: "pending" }, { status: "rejected" });
+    } else {
+      const remaining = await Claim.countDocuments({ item: claim.item._id, status: "pending", _id: { $ne: claim._id } });
+      if (!remaining) { claim.item.status = "open"; await claim.item.save(); }
+    }
+    res.json({ message: `Claim ${claim.status}.`, claim });
+  } catch (e) { next(e); }
+});
+export default router;
+
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\routes\items.js ==========
+
+
+import { Router } from "express";
+import bcrypt from "bcryptjs";
+import Item from "../models/Item.js";
+import Claim from "../models/Claim.js";
+import { protect } from "../middleware/auth.js";
+import { upload } from "../middleware/upload.js";
+
+const router = Router();
+
+// GET all listings
+router.get("/", async (req, res, next) => {
+  try {
+    const { q, type, category, location, status = "open", page = 1 } = req.query;
+    const filter = {};
+
+    if (type && ["lost", "found"].includes(type)) filter.type = type;
+    if (category) filter.category = category;
+    if (location) filter.location = { $regex: location, $options: "i" };
+    if (status !== "all") filter.status = status;
+
+    if (q) {
+      filter.$or = ["title", "description", "location"].map((key) => ({
+        [key]: { $regex: q, $options: "i" }
+      }));
+    }
+
+    const limit = 24;
+    const currentPage = Math.max(1, Number(page));
+
+    const items = await Item.find(filter)
+      .select("-verificationAnswerHash -verificationQuestion")
+      .populate("owner", "name")
+      .sort({ createdAt: -1 })
+      .skip((currentPage - 1) * limit)
+      .limit(limit);
+
+    const total = await Item.countDocuments(filter);
+
+    res.json({
+      items,
+      total,
+      page: currentPage,
+      pages: Math.ceil(total / limit)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// CREATE a new listing
+router.post("/", protect, upload.single("photo"), async (req, res, next) => {
+  try {
+    const {
+      type,
+      title,
+      description,
+      category,
+      location,
+      dateOccurred,
+      verificationQuestion,
+      verificationAnswer
+    } = req.body;
+
+    if (
+      !["lost", "found"].includes(type) ||
+      !title ||
+      !description ||
+      !category ||
+      !location ||
+      !dateOccurred ||
+      !verificationQuestion ||
+      !verificationAnswer
+    ) {
+      return res.status(400).json({
+        message: "Please complete all required fields, including the private verification question and answer."
+      });
+    }
+
+    const item = await Item.create({
+      type,
+      title,
+      description,
+      category,
+      location,
+      dateOccurred,
+      verificationQuestion,
+      verificationAnswerHash: await bcrypt.hash(
+        verificationAnswer.trim().toLowerCase(),
+        12
+      ),
+      imageUrl: req.file
+        ? `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`
+        : "",
+      owner: req.user.id
+    });
+
+    res.status(201).json({
+      item: {
+        ...item.toObject(),
+        verificationAnswerHash: undefined,
+        verificationQuestion: undefined
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET private verification question
+router.get("/:id/private-question", protect, async (req, res, next) => {
+  try {
+    const item = await Item.findById(req.params.id)
+      .select("verificationQuestion owner status");
+
+    if (!item) {
+      return res.status(404).json({ message: "Listing not found." });
+    }
+
+    if (String(item.owner) === req.user.id) {
+      return res.status(403).json({ message: "You are the listing owner." });
+    }
+
+    if (item.status !== "open") {
+      return res.status(400).json({
+        message: "This listing is not accepting claims."
+      });
+    }
+
+    res.json({ question: item.verificationQuestion });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET one listing
+router.get("/:id", async (req, res, next) => {
+  try {
+    const item = await Item.findById(req.params.id)
+      .select("-verificationAnswerHash -verificationQuestion")
+      .populate("owner", "name");
+
+    if (!item) {
+      return res.status(404).json({ message: "Listing not found." });
+    }
+
+    res.json({ item });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET matching listings
+router.get("/:id/matches", protect, async (req, res, next) => {
+  try {
+    const source = await Item.findById(req.params.id);
+
+    if (!source) {
+      return res.status(404).json({ message: "Listing not found." });
+    }
+
+    const opposite = source.type === "lost" ? "found" : "lost";
+
+    const candidates = await Item.find({
+      type: opposite,
+      status: "open",
+      _id: { $ne: source.id }
+    })
+      .select("-verificationAnswerHash -verificationQuestion")
+      .limit(100);
+
+    const terms = `${source.title} ${source.description}`
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((word) => word.length > 2);
+
+    const matches = candidates
+      .map((item) => {
+        const hay = `${item.title} ${item.description}`.toLowerCase();
+        const hits = terms.filter((term) => hay.includes(term)).length;
+
+        const score =
+          (item.category === source.category ? 45 : 0) +
+          Math.min(55, hits * 12) +
+          (item.location.toLowerCase() === source.location.toLowerCase()
+            ? 10
+            : 0);
+
+        return { item, score: Math.min(100, score) };
+      })
+      .filter((match) => match.score >= 20)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8);
+
+    res.json({ matches });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// SUBMIT a claim
+router.post("/:id/claims", protect, async (req, res, next) => {
+  try {
+    const item = await Item.findById(req.params.id);
+
+    if (!item) {
+      return res.status(404).json({ message: "Listing not found." });
+    }
+
+    if (String(item.owner) === req.user.id) {
+      return res.status(400).json({
+        message: "You cannot claim your own listing."
+      });
+    }
+
+    if (item.status !== "open") {
+      return res.status(400).json({
+        message: "This listing is no longer open for claims."
+      });
+    }
+
+    const { answer, explanation } = req.body;
+
+    if (!answer || !explanation) {
+      return res.status(400).json({
+        message: "Answer and explanation are required."
+      });
+    }
+
+    const already = await Claim.findOne({
+      item: item.id,
+      claimant: req.user.id,
+      status: "pending"
+    });
+
+    if (already) {
+      return res.status(409).json({
+        message: "You already have a pending claim for this item."
+      });
+    }
+
+    const answerCorrect = await bcrypt.compare(
+      answer.trim().toLowerCase(),
+      item.verificationAnswerHash
+    );
+
+    const claim = await Claim.create({
+      item: item.id,
+      claimant: req.user.id,
+      explanation,
+      answerCorrect
+    });
+
+    item.status = "pending";
+    await item.save();
+
+    res.status(201).json({
+      message: "Claim submitted. The listing owner will review it.",
+      claim: {
+        id: claim.id,
+        status: claim.status
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// UPDATE listing status
+router.patch("/:id/status", protect, async (req, res, next) => {
+  try {
+    const item = await Item.findById(req.params.id);
+
+    if (!item) {
+      return res.status(404).json({ message: "Listing not found." });
+    }
+
+    if (
+      String(item.owner) !== req.user.id &&
+      req.user.role !== "admin"
+    ) {
+      return res.status(403).json({ message: "Not authorized." });
+    }
+
+    if (!["open", "closed", "claimed"].includes(req.body.status)) {
+      return res.status(400).json({ message: "Invalid status." });
+    }
+
+    item.status = req.body.status;
+    await item.save();
+
+    res.json({ item });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE a listing
+router.delete("/:id", protect, async (req, res, next) => {
+  try {
+    const item = await Item.findById(req.params.id);
+
+    if (!item) {
+      return res.status(404).json({ message: "Listing not found." });
+    }
+
+    // Only the listing owner or an admin can delete it.
+    if (
+      String(item.owner) !== req.user.id &&
+      req.user.role !== "admin"
+    ) {
+      return res.status(403).json({
+        message: "You are not authorized to delete this listing."
+      });
+    }
+
+    // Delete all claims associated with this listing.
+    await Claim.deleteMany({ item: item._id });
+
+    // Delete the listing itself.
+    await item.deleteOne();
+
+    res.json({
+      message: "Listing deleted successfully."
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+export default router;
+
+
+
+========== C:\Users\athar\OneDrive\Desktop\Desktop\ATHARV\CampusFind_Hackathon_Project\CampusFind_Hackathon_Project\server\src\server.js ==========
+
+import dns from "node:dns";
+import dotenv from "dotenv";
+import express from "express";
+import mongoose from "mongoose";
+import cors from "cors";
+import helmet from "helmet";
+import morgan from "morgan";
+import rateLimit from "express-rate-limit";
+import path from "path";
+import { fileURLToPath } from "url";
+
+import authRoutes from "./routes/auth.js";
+import itemRoutes from "./routes/items.js";
+import claimRoutes from "./routes/claims.js";
+import adminRoutes from "./routes/admin.js";
+import mongoose from "mongoose";
+
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => app.listen(port, () => console.log(`CampusFind API running on ${port}`)))
+  .catch(err => {
+    console.error("MongoDB connection failed:", err.message);
+    process.exit(1);
+  });
+// Workaround for Node.js DNS resolution issue
+dns.setServers(["8.8.8.8", "8.8.4.4"]);
+
+dotenv.config();
+
+const app = express();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173" }));
+app.use(express.json({ limit: "1mb" }));
+app.use(morgan("dev"));
+app.use("/uploads", express.static(path.resolve(__dirname, "../uploads")));
+app.use("/api", rateLimit({ windowMs: 15 * 60 * 1000, limit: 250 }));
+app.get("/api/health", (_req, res) => res.json({ status: "ok", app: "CampusFind API" }));
+app.use("/api/auth", authRoutes);
+app.use("/api/items", itemRoutes);
+app.use("/api/claims", claimRoutes);
+app.use("/api/admin", adminRoutes);
+app.use((err, _req, res, _next) => {
+  console.error(err);
+  res.status(err.status || 500).json({ message: err.message || "Server error" });
+});
+const port = process.env.PORT || 5000;
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => app.listen(port, () => console.log(`CampusFind API running on ${port}`)))
+  .catch(err => { console.error("MongoDB connection failed:", err.message); process.exit(1); });
