@@ -1,4 +1,3 @@
-```javascript
 const BASE =
   import.meta.env.VITE_API_URL ||
   "https://campusfind-6vuu.onrender.com/api";
@@ -40,4 +39,3 @@ export async function api(path, options = {}) {
 }
 
 export const imageUrl = url => url || "";
-```
