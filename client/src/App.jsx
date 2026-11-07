@@ -79,18 +79,28 @@ function App() {
 
   // Restore login session
   useEffect(() => {
-    if (token()) {
-      api("/auth/me")
-        .then(data => setUser(data.user))
-        .catch(() => {
+  if (token()) {
+    api("/auth/me")
+      .then(data => {
+        setUser(data.user);
+      })
+      .catch(error => {
+        // Delete token only if the server rejects authentication.
+        if (error.status === 401 || error.status === 403) {
           localStorage.removeItem("cf_token");
           setUser(null);
-        })
-        .finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
-  }, []);
+        } else {
+          // Temporary network/server error: preserve the token.
+          console.error("Session verification failed:", error);
+        }
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  } else {
+    setLoading(false);
+  }
+}, []);
 
   // Logout
   const logout = () => {
