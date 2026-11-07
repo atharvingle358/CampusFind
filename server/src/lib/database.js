@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+
 const dataDir = path.resolve(here, "../../data");
+
+// One operation queue per collection
 const queues = new Map();
 
 const files = {
@@ -13,97 +16,278 @@ const files = {
   claims: path.join(dataDir, "claims.json")
 };
 
-async function ensureFile(collection) {
+
+// Get collection file
+function getFile(collection) {
   const file = files[collection];
-  if (!file) throw new Error(`Unknown data collection: ${collection}`);
-  await fs.mkdir(dataDir, { recursive: true });
-  try {
-    await fs.access(file);
-  } catch {
-    await fs.writeFile(file, "[]\n", "utf8");
+
+  if (!file) {
+    throw new Error(`Unknown data collection: ${collection}`);
   }
+
   return file;
 }
 
-export async function readAll(collection) {
+
+// Ensure collection file exists
+async function ensureFile(collection) {
+  const file = getFile(collection);
+
+  await fs.mkdir(dataDir, { recursive: true });
+
+  try {
+    await fs.access(file);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+
+    try {
+      await fs.writeFile(file, "[]\n", {
+        encoding: "utf8",
+        flag: "wx"
+      });
+    } catch (writeError) {
+      if (writeError.code !== "EEXIST") throw writeError;
+    }
+  }
+
+  return file;
+}
+
+
+// Read collection data
+async function readFile(collection) {
   const file = await ensureFile(collection);
+
   try {
     const raw = await fs.readFile(file, "utf8");
     const data = JSON.parse(raw || "[]");
-    return Array.isArray(data) ? data : [];
+
+    if (!Array.isArray(data)) {
+      throw new Error(
+        `${collection}.json must contain a JSON array.`
+      );
+    }
+
+    return data;
+
   } catch (error) {
     if (error instanceof SyntaxError) {
-      throw new Error(`${collection}.json contains invalid JSON. Stop the server and repair or restore that file.`);
+      throw new Error(
+        `${collection}.json contains invalid JSON. Repair or restore the file.`
+      );
     }
+
     throw error;
   }
 }
 
-export async function writeAll(collection, records) {
+
+// Atomically write collection data
+async function saveFile(collection, records) {
   const file = await ensureFile(collection);
-  const previous = queues.get(collection) || Promise.resolve();
-  const next = previous.then(async () => {
-    const temp = `${file}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(records, null, 2) + "\n", "utf8");
+
+  const temp = path.join(
+    dataDir,
+    `${collection}.${randomUUID()}.tmp`
+  );
+
+  try {
+    await fs.writeFile(
+      temp,
+      JSON.stringify(records, null, 2) + "\n",
+      "utf8"
+    );
+
     await fs.rename(temp, file);
-  });
-  queues.set(collection, next.catch(() => {}));
-  await next;
+
+  } catch (error) {
+    await fs.unlink(temp).catch(() => {});
+    throw error;
+  }
 }
 
+
+// Execute operations sequentially for each collection
+function enqueue(collection, operation) {
+  const previous = queues.get(collection) || Promise.resolve();
+
+  const next = previous.then(operation);
+
+  queues.set(
+    collection,
+    next.catch(() => {})
+  );
+
+  return next;
+}
+
+
+// Perform a complete read-modify-write operation
+function mutate(collection, callback) {
+  return enqueue(collection, async () => {
+    const records = await readFile(collection);
+
+    const result = await callback(records);
+
+    return result;
+  });
+}
+
+
+// Public read function
+export async function readAll(collection) {
+  return enqueue(collection, () => readFile(collection));
+}
+
+
+// Public write function
+export async function writeAll(collection, records) {
+  if (!Array.isArray(records)) {
+    throw new Error("Database records must be an array.");
+  }
+
+  return enqueue(collection, () =>
+    saveFile(collection, records)
+  );
+}
+
+
+// Generate unique ID
 export const newId = () => randomUUID();
-export const findById = async (collection, id) =>
-  (await readAll(collection)).find(row => String(row.id) === String(id)) || null;
 
+
+// Find record by ID
+export async function findById(collection, id) {
+  const records = await readAll(collection);
+
+  return (
+    records.find(row =>
+      String(row.id ?? row._id) === String(id)
+    ) || null
+  );
+}
+
+
+// Insert new record
 export async function insert(collection, record) {
-  const rows = await readAll(collection);
-  const now = new Date().toISOString();
-  const saved = { id: record.id || newId(), createdAt: now, updatedAt: now, ...record };
-  rows.push(saved);
-  await writeAll(collection, rows);
-  return saved;
-}
+  return mutate(collection, async records => {
+    const now = new Date().toISOString();
 
-export async function updateById(collection, id, changes) {
-  const rows = await readAll(collection);
-  const index = rows.findIndex(row => String(row.id) === String(id));
-  if (index < 0) return null;
-  rows[index] = { ...rows[index], ...changes, updatedAt: new Date().toISOString() };
-  await writeAll(collection, rows);
-  return rows[index];
-}
+    const saved = {
+      ...record,
+      id: record.id || record._id || newId(),
+      createdAt: record.createdAt || now,
+      updatedAt: now
+    };
 
-export async function removeById(collection, id) {
-  const rows = await readAll(collection);
-  const kept = rows.filter(row => String(row.id) !== String(id));
-  await writeAll(collection, kept);
-  return rows.length - kept.length;
-}
+    records.push(saved);
 
-export async function removeWhere(collection, predicate) {
-  const rows = await readAll(collection);
-  const kept = rows.filter(row => !predicate(row));
-  await writeAll(collection, kept);
-  return rows.length - kept.length;
-}
+    await saveFile(collection, records);
 
-export async function updateWhere(collection, predicate, changes) {
-  const rows = await readAll(collection);
-  let changed = 0;
-  const now = new Date().toISOString();
-  const updated = rows.map(row => {
-    if (!predicate(row)) return row;
-    changed++;
-    return { ...row, ...changes, updatedAt: now };
+    return saved;
   });
-  if (changed) await writeAll(collection, updated);
-  return changed;
 }
 
-export const countWhere = async (collection, predicate = () => true) =>
-  (await readAll(collection)).filter(predicate).length;
+
+// Update record by ID
+export async function updateById(collection, id, changes) {
+  return mutate(collection, async records => {
+    const index = records.findIndex(row =>
+      String(row.id ?? row._id) === String(id)
+    );
+
+    if (index === -1) return null;
+
+    const updated = {
+      ...records[index],
+      ...changes,
+      id: records[index].id ?? records[index]._id,
+      updatedAt: new Date().toISOString()
+    };
+
+    records[index] = updated;
+
+    await saveFile(collection, records);
+
+    return updated;
+  });
+}
 
 
+// Remove record by ID
+export async function removeById(collection, id) {
+  return mutate(collection, async records => {
+    const remaining = records.filter(row =>
+      String(row.id ?? row._id) !== String(id)
+    );
+
+    const removed = records.length - remaining.length;
+
+    if (removed > 0) {
+      await saveFile(collection, remaining);
+    }
+
+    return removed;
+  });
+}
+
+
+// Remove records matching condition
+export async function removeWhere(collection, predicate) {
+  return mutate(collection, async records => {
+    const remaining = records.filter(row => !predicate(row));
+
+    const removed = records.length - remaining.length;
+
+    if (removed > 0) {
+      await saveFile(collection, remaining);
+    }
+
+    return removed;
+  });
+}
+
+
+// Update records matching condition
+export async function updateWhere(collection, predicate, changes) {
+  return mutate(collection, async records => {
+    let changed = 0;
+
+    const now = new Date().toISOString();
+
+    const updated = records.map(row => {
+      if (!predicate(row)) return row;
+
+      changed++;
+
+      return {
+        ...row,
+        ...changes,
+        updatedAt: now
+      };
+    });
+
+    if (changed > 0) {
+      await saveFile(collection, updated);
+    }
+
+    return changed;
+  });
+}
+
+
+// Count records
+export async function countWhere(
+  collection,
+  predicate = () => true
+) {
+  const records = await readAll(collection);
+
+  return records.filter(predicate).length;
+}
+
+
+// Return safe public user data
 export function publicUser(user, includeEmail = false) {
   if (!user) return null;
 
@@ -123,6 +307,8 @@ export function publicUser(user, includeEmail = false) {
   return result;
 }
 
+
+// Return safe public item data
 export function publicItem(item, includePrivate = false) {
   if (!item) return null;
 
@@ -132,8 +318,10 @@ export function publicItem(item, includePrivate = false) {
     _id: item._id ?? item.id
   };
 
+  // Never expose verification answer hashes
+  delete result.verificationAnswerHash;
+
   if (!includePrivate) {
-    delete result.verificationAnswerHash;
     delete result.verificationQuestion;
   }
 
