@@ -7,5 +7,5 @@ server/node_modules/
 dist/
 build/
 .DS_Store
-
 server/data/*.json
+server/data-backup-before-deployment/
