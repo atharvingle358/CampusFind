@@ -1,30 +1,89 @@
 import { Router } from "express";
-import { readAll, publicUser, publicItem } from "../lib/database.js";
-import { protect, adminOnly } from "../middleware/auth.js";
+
+import {
+  readAll,
+  publicUser,
+  publicItem
+} from "../lib/database.js";
+
+import {
+  protect,
+  adminOnly
+} from "../middleware/auth.js";
 
 const router = Router();
 
+const sameId = (a, b) =>
+  String(a ?? "") === String(b ?? "");
+
+
+// GET: Admin Dashboard Statistics
 router.get("/stats", protect, adminOnly, async (_req, res, next) => {
   try {
-    const [users, items, claims] = await Promise.all([readAll("users"), readAll("items"), readAll("claims")]);
+    const [users, items, claims] = await Promise.all([
+      readAll("users"),
+      readAll("items"),
+      readAll("claims")
+    ]);
+
     res.json({
       users: users.length,
+
       items: items.length,
-      lost: items.filter(i => i.type === "lost").length,
-      found: items.filter(i => i.type === "found").length,
-      claimed: items.filter(i => i.status === "claimed").length,
-      pendingClaims: claims.filter(c => c.status === "pending").length
+
+      lost: items.filter(
+        item => item.type === "lost"
+      ).length,
+
+      found: items.filter(
+        item => item.type === "found"
+      ).length,
+
+      claimed: items.filter(
+        item => item.status === "claimed"
+      ).length,
+
+      pendingClaims: claims.filter(
+        claim => claim.status === "pending"
+      ).length
     });
-  } catch (e) { next(e); }
+
+  } catch (error) {
+    next(error);
+  }
 });
 
+
+// GET: Admin View All Items
 router.get("/items", protect, adminOnly, async (_req, res, next) => {
   try {
-    const [items, users] = await Promise.all([readAll("items"), readAll("users")]);
-    const result = items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 200)
-      .map(item => ({ ...publicItem(item), owner: publicUser(users.find(u => u.id === item.owner), true) }));
+    const [items, users] = await Promise.all([
+      readAll("items"),
+      readAll("users")
+    ]);
+
+    const result = items
+      .sort(
+        (a, b) =>
+          new Date(b.createdAt) - new Date(a.createdAt)
+      )
+      .slice(0, 200)
+      .map(item => {
+        const owner = users.find(user =>
+          sameId(user.id ?? user._id, item.owner)
+        );
+
+        return {
+          ...publicItem(item),
+          owner: publicUser(owner, true)
+        };
+      });
+
     res.json({ items: result });
-  } catch (e) { next(e); }
+
+  } catch (error) {
+    next(error);
+  }
 });
 
 export default router;
