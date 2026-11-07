@@ -270,7 +270,7 @@ function App() {
         </span>
 
         <span>
-          Made with ❤️ by Atharv
+          Made ❤️ by Atharv
         </span>
 
         <span>
