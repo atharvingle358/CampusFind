@@ -20,7 +20,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsDir = path.resolve(__dirname, "../uploads");
 fs.mkdirSync(uploadsDir, { recursive: true });
 
-const configuredOrigins = (process.env.CLIENT_URL || "http://localhost:5173")
+const configuredOrigins = (process.env.CLIENT_URL || "https://campus-find-psi-six.vercel.app/register")
   .split(",").map(value => value.trim()).filter(Boolean);
 
 function allowedOrigin(origin) {
