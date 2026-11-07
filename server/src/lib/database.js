@@ -5,9 +5,11 @@ import { randomUUID } from "node:crypto";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-const dataDir = path.resolve(here, "../../data");
+// Render Persistent Disk path, or local development folder
+const dataDir = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.resolve(here, "../../data");
 
-// One operation queue per collection
 const queues = new Map();
 
 const files = {
@@ -16,8 +18,6 @@ const files = {
   claims: path.join(dataDir, "claims.json")
 };
 
-
-// Get collection file
 function getFile(collection) {
   const file = files[collection];
 
@@ -28,8 +28,6 @@ function getFile(collection) {
   return file;
 }
 
-
-// Ensure collection file exists
 async function ensureFile(collection) {
   const file = getFile(collection);
 
@@ -53,8 +51,6 @@ async function ensureFile(collection) {
   return file;
 }
 
-
-// Read collection data
 async function readFile(collection) {
   const file = await ensureFile(collection);
 
@@ -69,11 +65,10 @@ async function readFile(collection) {
     }
 
     return data;
-
   } catch (error) {
     if (error instanceof SyntaxError) {
       throw new Error(
-        `${collection}.json contains invalid JSON. Repair or restore the file.`
+        `${collection}.json contains invalid JSON.`
       );
     }
 
@@ -81,8 +76,6 @@ async function readFile(collection) {
   }
 }
 
-
-// Atomically write collection data
 async function saveFile(collection, records) {
   const file = await ensureFile(collection);
 
@@ -99,48 +92,33 @@ async function saveFile(collection, records) {
     );
 
     await fs.rename(temp, file);
-
   } catch (error) {
     await fs.unlink(temp).catch(() => {});
     throw error;
   }
 }
 
-
-// Execute operations sequentially for each collection
 function enqueue(collection, operation) {
   const previous = queues.get(collection) || Promise.resolve();
 
   const next = previous.then(operation);
 
-  queues.set(
-    collection,
-    next.catch(() => {})
-  );
+  queues.set(collection, next.catch(() => {}));
 
   return next;
 }
 
-
-// Perform a complete read-modify-write operation
 function mutate(collection, callback) {
   return enqueue(collection, async () => {
     const records = await readFile(collection);
-
-    const result = await callback(records);
-
-    return result;
+    return callback(records);
   });
 }
 
-
-// Public read function
 export async function readAll(collection) {
   return enqueue(collection, () => readFile(collection));
 }
 
-
-// Public write function
 export async function writeAll(collection, records) {
   if (!Array.isArray(records)) {
     throw new Error("Database records must be an array.");
@@ -151,12 +129,8 @@ export async function writeAll(collection, records) {
   );
 }
 
-
-// Generate unique ID
 export const newId = () => randomUUID();
 
-
-// Find record by ID
 export async function findById(collection, id) {
   const records = await readAll(collection);
 
@@ -167,8 +141,6 @@ export async function findById(collection, id) {
   );
 }
 
-
-// Insert new record
 export async function insert(collection, record) {
   return mutate(collection, async records => {
     const now = new Date().toISOString();
@@ -188,8 +160,6 @@ export async function insert(collection, record) {
   });
 }
 
-
-// Update record by ID
 export async function updateById(collection, id, changes) {
   return mutate(collection, async records => {
     const index = records.findIndex(row =>
@@ -213,8 +183,6 @@ export async function updateById(collection, id, changes) {
   });
 }
 
-
-// Remove record by ID
 export async function removeById(collection, id) {
   return mutate(collection, async records => {
     const remaining = records.filter(row =>
@@ -231,8 +199,6 @@ export async function removeById(collection, id) {
   });
 }
 
-
-// Remove records matching condition
 export async function removeWhere(collection, predicate) {
   return mutate(collection, async records => {
     const remaining = records.filter(row => !predicate(row));
@@ -247,12 +213,9 @@ export async function removeWhere(collection, predicate) {
   });
 }
 
-
-// Update records matching condition
 export async function updateWhere(collection, predicate, changes) {
   return mutate(collection, async records => {
     let changed = 0;
-
     const now = new Date().toISOString();
 
     const updated = records.map(row => {
@@ -275,8 +238,6 @@ export async function updateWhere(collection, predicate, changes) {
   });
 }
 
-
-// Count records
 export async function countWhere(
   collection,
   predicate = () => true
@@ -286,8 +247,6 @@ export async function countWhere(
   return records.filter(predicate).length;
 }
 
-
-// Return safe public user data
 export function publicUser(user, includeEmail = false) {
   if (!user) return null;
 
@@ -307,8 +266,6 @@ export function publicUser(user, includeEmail = false) {
   return result;
 }
 
-
-// Return safe public item data
 export function publicItem(item, includePrivate = false) {
   if (!item) return null;
 
@@ -318,7 +275,6 @@ export function publicItem(item, includePrivate = false) {
     _id: item._id ?? item.id
   };
 
-  // Never expose verification answer hashes
   delete result.verificationAnswerHash;
 
   if (!includePrivate) {
