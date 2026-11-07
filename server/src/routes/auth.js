@@ -5,7 +5,7 @@ import { readAll, insert, publicUser } from "../lib/database.js";
 import { protect } from "../middleware/auth.js";
 
 const router = Router();
-const tokenFor = id => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+const tokenFor = id => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
 
 router.post("/register", async (req, res, next) => {
   try {
