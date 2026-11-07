@@ -1,4 +1,4 @@
-const BASE = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+const BASE = import.meta.env.VITE_API_URL || "https://campusfind-6vuu.onrender.com/api";
 export function token() { return localStorage.getItem("cf_token"); }
 export async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
