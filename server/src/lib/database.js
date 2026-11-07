@@ -1,243 +1,285 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { createClient } from "@supabase/supabase-js";
 import { randomUUID } from "node:crypto";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Render Persistent Disk path, or local development folder
-const dataDir = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : path.resolve(here, "../../data");
-
-const queues = new Map();
-
-const files = {
-  users: path.join(dataDir, "users.json"),
-  items: path.join(dataDir, "items.json"),
-  claims: path.join(dataDir, "claims.json")
-};
-
-function getFile(collection) {
-  const file = files[collection];
-
-  if (!file) {
-    throw new Error(`Unknown data collection: ${collection}`);
-  }
-
-  return file;
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error(
+    "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY."
+  );
 }
 
-async function ensureFile(collection) {
-  const file = getFile(collection);
-
-  await fs.mkdir(dataDir, { recursive: true });
-
-  try {
-    await fs.access(file);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-
-    try {
-      await fs.writeFile(file, "[]\n", {
-        encoding: "utf8",
-        flag: "wx"
-      });
-    } catch (writeError) {
-      if (writeError.code !== "EEXIST") throw writeError;
+export const supabase = createClient(
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false
     }
   }
+);
 
-  return file;
+const allowedCollections = [
+  "users",
+  "items",
+  "claims"
+];
+
+function validateCollection(collection) {
+  if (!allowedCollections.includes(collection)) {
+    throw new Error(`Unknown collection: ${collection}`);
+  }
+
+  return collection;
 }
 
-async function readFile(collection) {
-  const file = await ensureFile(collection);
-
-  try {
-    const raw = await fs.readFile(file, "utf8");
-    const data = JSON.parse(raw || "[]");
-
-    if (!Array.isArray(data)) {
-      throw new Error(
-        `${collection}.json must contain a JSON array.`
-      );
-    }
-
-    return data;
-  } catch (error) {
-    if (error instanceof SyntaxError) {
-      throw new Error(
-        `${collection}.json contains invalid JSON.`
-      );
-    }
-
-    throw error;
+function handleError(error) {
+  if (error) {
+    console.error("Supabase database error:", error);
+    throw new Error(error.message || "Database operation failed.");
   }
 }
 
-async function saveFile(collection, records) {
-  const file = await ensureFile(collection);
+function fromDatabase(row) {
+  if (!row) return null;
 
-  const temp = path.join(
-    dataDir,
-    `${collection}.${randomUUID()}.tmp`
+  return {
+    ...row.data,
+    id: row.id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function toDatabase(record) {
+  const now = new Date().toISOString();
+
+  const id = String(
+    record.id || record._id || newId()
   );
 
-  try {
-    await fs.writeFile(
-      temp,
-      JSON.stringify(records, null, 2) + "\n",
-      "utf8"
-    );
+  const createdAt = record.createdAt || now;
 
-    await fs.rename(temp, file);
-  } catch (error) {
-    await fs.unlink(temp).catch(() => {});
+  const saved = {
+    ...record,
+    id,
+    createdAt,
+    updatedAt: now
+  };
+
+  return {
+    id,
+    data: saved,
+    created_at: createdAt,
+    updated_at: now
+  };
+}
+
+// Test database connection
+export async function testDatabaseConnection() {
+  const { error } = await supabase
+    .from("users")
+    .select("id")
+    .limit(1);
+
+  if (error) {
     throw error;
   }
+
+  console.log("Supabase database connected successfully.");
+
+  return true;
 }
 
-function enqueue(collection, operation) {
-  const previous = queues.get(collection) || Promise.resolve();
+// Generate unique ID
+export const newId = () => randomUUID();
 
-  const next = previous.then(operation);
-
-  queues.set(collection, next.catch(() => {}));
-
-  return next;
-}
-
-function mutate(collection, callback) {
-  return enqueue(collection, async () => {
-    const records = await readFile(collection);
-    return callback(records);
-  });
-}
-
+// Read all records
 export async function readAll(collection) {
-  return enqueue(collection, () => readFile(collection));
+  validateCollection(collection);
+
+  const { data, error } = await supabase
+    .from(collection)
+    .select("id, data, created_at, updated_at");
+
+  handleError(error);
+
+  return (data || []).map(fromDatabase);
 }
 
+// Replace all records
 export async function writeAll(collection, records) {
+  validateCollection(collection);
+
   if (!Array.isArray(records)) {
     throw new Error("Database records must be an array.");
   }
 
-  return enqueue(collection, () =>
-    saveFile(collection, records)
+  const rows = records.map(toDatabase);
+
+  const { data: existing, error: readError } = await supabase
+    .from(collection)
+    .select("id");
+
+  handleError(readError);
+
+  const existingIds = (existing || []).map(row => row.id);
+  const newIds = rows.map(row => row.id);
+
+  const idsToDelete = existingIds.filter(
+    id => !newIds.includes(id)
   );
+
+  if (idsToDelete.length > 0) {
+    const { error } = await supabase
+      .from(collection)
+      .delete()
+      .in("id", idsToDelete);
+
+    handleError(error);
+  }
+
+  if (rows.length > 0) {
+    const { error } = await supabase
+      .from(collection)
+      .upsert(rows, { onConflict: "id" });
+
+    handleError(error);
+  }
+
+  return records;
 }
 
-export const newId = () => randomUUID();
-
+// Find record by ID
 export async function findById(collection, id) {
+  validateCollection(collection);
+
+  const { data, error } = await supabase
+    .from(collection)
+    .select("id, data, created_at, updated_at")
+    .eq("id", String(id))
+    .maybeSingle();
+
+  handleError(error);
+
+  return fromDatabase(data);
+}
+
+// Insert record
+export async function insert(collection, record) {
+  validateCollection(collection);
+
+  const row = toDatabase(record);
+
+  const { data, error } = await supabase
+    .from(collection)
+    .insert(row)
+    .select("id, data, created_at, updated_at")
+    .single();
+
+  handleError(error);
+
+  return fromDatabase(data);
+}
+
+// Update record by ID
+export async function updateById(collection, id, changes) {
+  validateCollection(collection);
+
+  const existing = await findById(collection, id);
+
+  if (!existing) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+
+  const updated = {
+    ...existing,
+    ...changes,
+    id: existing.id,
+    createdAt: existing.createdAt,
+    updatedAt: now
+  };
+
+  const { data, error } = await supabase
+    .from(collection)
+    .update({
+      data: updated,
+      updated_at: now
+    })
+    .eq("id", String(id))
+    .select("id, data, created_at, updated_at")
+    .maybeSingle();
+
+  handleError(error);
+
+  return fromDatabase(data);
+}
+
+// Delete record by ID
+export async function removeById(collection, id) {
+  validateCollection(collection);
+
+  const { data, error } = await supabase
+    .from(collection)
+    .delete()
+    .eq("id", String(id))
+    .select("id");
+
+  handleError(error);
+
+  return data?.length || 0;
+}
+
+// Delete matching records
+export async function removeWhere(collection, predicate) {
   const records = await readAll(collection);
 
-  return (
-    records.find(row =>
-      String(row.id ?? row._id) === String(id)
-    ) || null
-  );
+  const ids = records
+    .filter(predicate)
+    .map(record => record.id);
+
+  if (ids.length === 0) {
+    return 0;
+  }
+
+  const { data, error } = await supabase
+    .from(collection)
+    .delete()
+    .in("id", ids)
+    .select("id");
+
+  handleError(error);
+
+  return data?.length || 0;
 }
 
-export async function insert(collection, record) {
-  return mutate(collection, async records => {
-    const now = new Date().toISOString();
-
-    const saved = {
-      ...record,
-      id: record.id || record._id || newId(),
-      createdAt: record.createdAt || now,
-      updatedAt: now
-    };
-
-    records.push(saved);
-
-    await saveFile(collection, records);
-
-    return saved;
-  });
-}
-
-export async function updateById(collection, id, changes) {
-  return mutate(collection, async records => {
-    const index = records.findIndex(row =>
-      String(row.id ?? row._id) === String(id)
-    );
-
-    if (index === -1) return null;
-
-    const updated = {
-      ...records[index],
-      ...changes,
-      id: records[index].id ?? records[index]._id,
-      updatedAt: new Date().toISOString()
-    };
-
-    records[index] = updated;
-
-    await saveFile(collection, records);
-
-    return updated;
-  });
-}
-
-export async function removeById(collection, id) {
-  return mutate(collection, async records => {
-    const remaining = records.filter(row =>
-      String(row.id ?? row._id) !== String(id)
-    );
-
-    const removed = records.length - remaining.length;
-
-    if (removed > 0) {
-      await saveFile(collection, remaining);
-    }
-
-    return removed;
-  });
-}
-
-export async function removeWhere(collection, predicate) {
-  return mutate(collection, async records => {
-    const remaining = records.filter(row => !predicate(row));
-
-    const removed = records.length - remaining.length;
-
-    if (removed > 0) {
-      await saveFile(collection, remaining);
-    }
-
-    return removed;
-  });
-}
-
+// Update matching records
 export async function updateWhere(collection, predicate, changes) {
-  return mutate(collection, async records => {
-    let changed = 0;
-    const now = new Date().toISOString();
+  const records = await readAll(collection);
 
-    const updated = records.map(row => {
-      if (!predicate(row)) return row;
+  const matching = records.filter(predicate);
 
-      changed++;
+  let updated = 0;
 
-      return {
-        ...row,
-        ...changes,
-        updatedAt: now
-      };
-    });
+  for (const record of matching) {
+    const result = await updateById(
+      collection,
+      record.id,
+      changes
+    );
 
-    if (changed > 0) {
-      await saveFile(collection, updated);
-    }
+    if (result) updated++;
+  }
 
-    return changed;
-  });
+  return updated;
 }
 
+// Count matching records
 export async function countWhere(
   collection,
   predicate = () => true
@@ -247,6 +289,7 @@ export async function countWhere(
   return records.filter(predicate).length;
 }
 
+// Return safe public user data
 export function publicUser(user, includeEmail = false) {
   if (!user) return null;
 
@@ -266,6 +309,7 @@ export function publicUser(user, includeEmail = false) {
   return result;
 }
 
+// Return safe public item data
 export function publicItem(item, includePrivate = false) {
   if (!item) return null;
 
