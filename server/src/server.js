@@ -45,7 +45,12 @@ app.use(cors({
     callback(new Error(`CORS blocked origin: ${origin}`));
   }
 }));
-app.options("*", cors());
+app.options(/.*/, cors({
+  origin(origin, callback) {
+    if (allowedOrigin(origin)) return callback(null, true);
+    callback(new Error(`CORS blocked origin: ${origin}`));
+  }
+}));
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
 app.use("/uploads", express.static(uploadsDir));
