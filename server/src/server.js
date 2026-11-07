@@ -25,7 +25,6 @@ const uploadsDir = path.resolve(__dirname, "../uploads");
 
 fs.mkdirSync(uploadsDir, { recursive: true });
 
-// Allowed frontend origins
 const configuredOrigins = (
   process.env.CLIENT_URL ||
   "https://campus-find-psi-six.vercel.app"
@@ -37,9 +36,7 @@ const configuredOrigins = (
 function allowedOrigin(origin) {
   if (!origin) return true;
 
-  if (configuredOrigins.includes(origin)) {
-    return true;
-  }
+  if (configuredOrigins.includes(origin)) return true;
 
   try {
     const url = new URL(origin);
@@ -60,16 +57,6 @@ function allowedOrigin(origin) {
   }
 }
 
-// Security
-app.use(
-  helmet({
-    crossOriginResourcePolicy: {
-      policy: "cross-origin"
-    }
-  })
-);
-
-// CORS
 const corsOptions = {
   origin(origin, callback) {
     if (allowedOrigin(origin)) {
@@ -80,17 +67,22 @@ const corsOptions = {
   }
 };
 
+app.use(
+  helmet({
+    crossOriginResourcePolicy: {
+      policy: "cross-origin"
+    }
+  })
+);
+
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
-// Request handling
 app.use(express.json({ limit: "1mb" }));
-
 app.use(morgan("dev"));
 
 app.use("/uploads", express.static(uploadsDir));
 
-// API rate limiting
 app.use(
   "/api",
   rateLimit({
@@ -101,20 +93,30 @@ app.use(
 
 // Health check
 app.get("/api/health", async (_req, res) => {
-  res.json({
-    status: "ok",
-    app: "CampusFind API",
-    database: "supabase"
-  });
+  try {
+    await testDatabaseConnection();
+
+    res.json({
+      status: "ok",
+      app: "CampusFind API",
+      database: "supabase"
+    });
+  } catch (error) {
+    res.status(503).json({
+      status: "error",
+      database: "disconnected",
+      message: "Database connection failed."
+    });
+  }
 });
 
-// API routes
+// Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/items", itemRoutes);
 app.use("/api/claims", claimRoutes);
 app.use("/api/admin", adminRoutes);
 
-// Error handler
+// Error handling
 app.use((err, _req, res, _next) => {
   console.error(err);
 
@@ -129,7 +131,7 @@ const port = Number(process.env.PORT) || 5000;
 async function startServer() {
   try {
     if (!process.env.JWT_SECRET) {
-      throw new Error("Missing JWT_SECRET environment variable.");
+      throw new Error("Missing JWT_SECRET.");
     }
 
     await testDatabaseConnection();
@@ -140,7 +142,7 @@ async function startServer() {
     });
 
   } catch (error) {
-    console.error("Failed to start CampusFind:", error.message);
+    console.error("Startup failed:", error.message);
     process.exit(1);
   }
 }
